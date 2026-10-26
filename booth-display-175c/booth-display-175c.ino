@@ -264,6 +264,20 @@ void drawCentered(const char *text, int16_t y, uint8_t textSize, uint16_t color)
   gfx->print(text);
 }
 
+// Same as drawCentered, but centered on an arbitrary point (cx, y) instead
+// of the screen center. The analog clock numerals need this: using
+// drawCentered for them put all twelve digits in one vertical column down
+// the middle of the face (3 over 9, 2 over 10, 1 over 11) — gibberish.
+void drawCenteredAt(const char *text, int16_t cx, int16_t y, uint8_t textSize, uint16_t color) {
+  gfx->setTextSize(textSize);
+  gfx->setTextColor(color);
+  int16_t x1, y1;
+  uint16_t w, h;
+  gfx->getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+  gfx->setCursor(cx - (int)w / 2 - x1, y - y1);
+  gfx->print(text);
+}
+
 // Page dots near the bottom, kept inside the round screen's chord.
 void drawDots(int current, int total, uint16_t color) {
   if (total < 2) return;
@@ -524,7 +538,11 @@ void clockTryNtp() {
       return;
     }
   }
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  // NOTE: do NOT use configTime(0, 0, ...) here. Arduino's configTime resets
+  // the timezone from the offsets given (0, 0 = UTC), which would clobber
+  // the Eastern TZ set in setup() and leave the clock displaying UTC
+  // (4 hours ahead in EDT) after every sync. configTzTime keeps CLOCK_TZ.
+  configTzTime(CLOCK_TZ, "pool.ntp.org", "time.nist.gov");
   struct tm tmNow;
   if (getLocalTime(&tmNow, 5000)) {
     clockBaseEpoch = mktime(&tmNow) - (time_t)(millis() / 1000);
@@ -532,10 +550,9 @@ void clockTryNtp() {
   }
 }
 
-void drawHand(float angleDeg, int len, uint16_t color, int width) {
+void drawHand(int cx, int cy, float angleDeg, int len, uint16_t color, int width) {
   float a = angleDeg * PI / 180.0f;
   float s = sin(a), c = cos(a);
-  int cx = SCREEN_W / 2, cy = SCREEN_H / 2;
   for (int o = -width / 2; o <= width / 2; o++) {
     gfx->drawLine(cx + (int)(c * o), cy + (int)(s * o),
                   cx + (int)(s * len + c * o), cy + (int)(-c * len + s * o), color);
@@ -564,25 +581,33 @@ void drawClockAnalog(struct tm *t) {
     int ny = cy - (int)(cos(a) * 140);
     char num[3];
     snprintf(num, sizeof(num), "%d", h);
-    drawCentered(num, ny - 12, 3, RGB565_WHITE);
+    drawCenteredAt(num, nx, ny - 12, 3, RGB565_WHITE);
   }
   // Thick hands with tails (no second hand: this clock has no seconds).
+  // NOTE: hands must use the face center (cx, cy) — an earlier version
+  // hardcoded the screen center here, 11px below the face.
   float hourAngle = ((t->tm_hour % 12) + t->tm_min / 60.0f) * 30.0f;
   float minAngle = t->tm_min * 6.0f;
-  drawHand(hourAngle + 180, 26, RGB565_WHITE, 11);
-  drawHand(minAngle + 180, 32, RGB565_WHITE, 7);
-  drawHand(hourAngle, 95, RGB565_WHITE, 11);
-  drawHand(minAngle, 150, RGB565_WHITE, 7);
+  drawHand(cx, cy, hourAngle + 180, 26, RGB565_WHITE, 11);
+  drawHand(cx, cy, minAngle + 180, 32, RGB565_WHITE, 7);
+  drawHand(cx, cy, hourAngle, 95, RGB565_WHITE, 11);
+  drawHand(cx, cy, minAngle, 150, RGB565_WHITE, 7);
   gfx->fillCircle(cx, cy, 11, RGB565_WHITE);
   gfx->fillCircle(cx, cy, 4, RGB565_BLACK);
+  // Small digital readout inside the face, below the 6. Besides being
+  // useful, it tells us whether the view itself is running if the face
+  // ever fails to render: text and face graphics take different paths.
+  char hm[6];
+  strftime(hm, sizeof(hm), "%I:%M", t);
+  drawCentered(hm, 388, 2, RGB565_LIGHTGREY);
   drawCentered("Tap = next view", 438, 1, RGB565_DARKGREY);
 }
 
 void drawClockDigital(struct tm *t) {
   gfx->fillScreen(RGB565_BLACK);
-  char hm[6], date[16], ampm[3];
+  char hm[6], date[20], ampm[3];
   strftime(hm, sizeof(hm), "%I:%M", t);
-  strftime(date, sizeof(date), "%a %b %d", t);
+  strftime(date, sizeof(date), "%a %b %d %Z", t);  // %Z shows EDT/EST: proof the TZ is right
   strftime(ampm, sizeof(ampm), "%p", t);
   drawCentered(hm, 180, 8, RGB565_WHITE);
   drawCentered(ampm, 272, 2, RGB565_LIGHTGREY);
@@ -599,6 +624,15 @@ int lastClockMinute = -1;  // analog/digital redraw only when this changes
 void drawClock() {
   struct tm t;
   clockNow(&t);
+  // Serial diagnostics: if a view ever renders blank on hardware, the
+  // Serial Monitor (115200 baud) shows whether the view ran and what
+  // time it computed.
+  char dbg[16];
+  strftime(dbg, sizeof(dbg), "%H:%M", &t);
+  Serial.print("Clock view ");
+  Serial.print(clockView);
+  Serial.print(" time ");
+  Serial.println(dbg);
   if (clockView == CLOCK_ANALOG) drawClockAnalog(&t);
   else if (clockView == CLOCK_DIGITAL) drawClockDigital(&t);
   else drawFlipClock(&t);
@@ -810,6 +844,7 @@ char kbPass[64] = "";
 int kbPassLen = 0;
 bool kbShift = false;
 bool kbSymbols = false;
+bool kbShowPass = true;  // password field shows real characters by default
 
 bool wifiSavedCreds(String &ssid, String &pass) {
   Preferences prefs;
@@ -890,6 +925,11 @@ void doSleep() {
   if (WiFi.status() == WL_CONNECTED) WiFi.disconnect(true);
   pinMode(PA, OUTPUT);
   digitalWrite(PA, LOW);  // speaker amp off
+  // Deep sleep halts the ESP32, but the AMOLED panel keeps its power rail
+  // (USB/battery via the PMU) and holds the last frame — so without the
+  // next line the screen would sit on "Sleeping..." forever. displayOff()
+  // sends the panel's own off command, so it actually goes dark.
+  gfx->displayOff();
   // Deep sleep: only the side BOOT button (GPIO0, active LOW) wakes it.
   // Saved Wi-Fi survives (NVS); the clock re-syncs via NTP on next entry
   // if a network is saved, else it restarts from compile time.
@@ -1053,9 +1093,9 @@ bool kbKeyRect(int row, int col, int *kx, int *ky, int *kw) {
     return true;
   }
   if (row == 4) {
-    static const int widths[5] = {60, 60, 136, 68, 68};
-    if (col < 0 || col > 4) return false;
-    int x = KB_X + 6;
+    static const int widths[6] = {56, 56, 56, 100, 64, 64};
+    if (col < 0 || col > 5) return false;
+    int x = KB_X + 2;
     for (int i = 0; i < col; i++) x += widths[i] + KB_GAP;
     *kx = x;
     *ky = y;
@@ -1083,14 +1123,27 @@ void drawKeyboard() {
   String title = "Password for " + kbSsid;
   if (title.length() > 30) title = title.substring(0, 29) + "~";
   drawCentered(title.c_str(), 28, 2, RGB565_WHITE);
-  String masked = "";
-  for (int i = 0; i < kbPassLen; i++) masked += "*";
-  if (masked.length() > 34) masked = "..." + masked.substring(masked.length() - 31);
+  // Password field: real characters by default (typing blind on a tiny
+  // keyboard is unusable), larger text, and the tail visible so you always
+  // see what you just typed. "_" marks the cursor. The Hide key masks it
+  // again if anyone is watching over your shoulder.
+  String shown;
+  if (kbShowPass) {
+    shown = String(kbPass);
+  } else {
+    for (int i = 0; i < kbPassLen; i++) shown += "*";
+  }
+  bool truncated = false;
+  if (shown.length() > 20) {
+    shown = "..." + shown.substring(shown.length() - 17);
+    truncated = true;
+  }
+  if (!truncated) shown += "_";
   gfx->drawRoundRect(43, 62, 380, 40, 8, RGB565_CYAN);
-  gfx->setTextSize(2);
+  gfx->setTextSize(3);
   gfx->setTextColor(RGB565_WHITE);
-  gfx->setCursor(58, 74);
-  gfx->print(masked.length() ? masked : "(empty)");
+  gfx->setCursor(58, 70);
+  gfx->print(shown);
   int kx, ky, kw;
   char label[2] = {' ', '\0'};
   for (int row = 0; row <= 2; row++) {
@@ -1111,20 +1164,26 @@ void drawKeyboard() {
     kbDrawKey(kx, ky, kw, label, false);
   }
   if (kbKeyRect(3, 7, &kx, &ky, &kw)) kbDrawKey(kx, ky, kw, "Bksp", false);
-  static const char *bottom[5] = {nullptr, "Shift", "Space", "Done", "Cancel"};
-  for (int col = 0; col < 5; col++) {
+  static const char *bottom[6] = {nullptr, "Shift", nullptr, "Space", "Done", "Cancel"};
+  for (int col = 0; col < 6; col++) {
     if (!kbKeyRect(4, col, &kx, &ky, &kw)) continue;
     const char *lbl = bottom[col];
     bool active = false;
-    if (col == 0) lbl = kbSymbols ? "123" : "#+=";
+    if (col == 0) {
+      lbl = kbSymbols ? "123" : "#+=";
+      active = kbSymbols;
+    }
     if (col == 1) active = kbShift;
-    if (col == 0) active = kbSymbols;
+    if (col == 2) {
+      lbl = kbShowPass ? "Hide" : "Show";
+      active = kbShowPass;
+    }
     kbDrawKey(kx, ky, kw, lbl, active);
   }
 }
 
 // Action codes are plain ints (see the note above kbKeyRect).
-enum KbAction { KB_NONE, KB_CHAR, KB_BKSP, KB_SHIFT, KB_SYMBOLS, KB_SPACE, KB_DONE, KB_CANCEL };
+enum KbAction { KB_NONE, KB_CHAR, KB_BKSP, KB_SHIFT, KB_SYMBOLS, KB_SPACE, KB_DONE, KB_CANCEL, KB_SHOW };
 
 bool kbHit(int x, int y, int *action, char *ch) {
   *action = KB_NONE;
@@ -1152,7 +1211,7 @@ bool kbHit(int x, int y, int *action, char *ch) {
         return true;
       }
       if (row == 4) {
-        *action = (col == 0) ? KB_SYMBOLS : (col == 1) ? KB_SHIFT : (col == 2) ? KB_SPACE : (col == 3) ? KB_DONE : KB_CANCEL;
+        *action = (col == 0) ? KB_SYMBOLS : (col == 1) ? KB_SHIFT : (col == 2) ? KB_SHOW : (col == 3) ? KB_SPACE : (col == 4) ? KB_DONE : KB_CANCEL;
         return true;
       }
     }
@@ -1238,6 +1297,7 @@ void setup() {
   if (!gfx->begin()) {
     Serial.println("gfx->begin() failed!");
   }
+  gfx->displayOn();  // re-enable the panel after a sleep/wake cycle
   gfx->fillScreen(RGB565_BLACK);
   gfx->setBrightness(255);  // booth lighting: full brightness
 
@@ -1385,6 +1445,7 @@ void loop() {
                 kbPass[0] = '\0';
                 kbShift = false;
                 kbSymbols = false;
+                kbShowPass = true;  // show what you type by default
                 drawKeyboard();
               }
             }
@@ -1409,6 +1470,9 @@ void loop() {
               drawKeyboard();
             } else if (act == KB_SYMBOLS) {
               kbSymbols = !kbSymbols;
+              drawKeyboard();
+            } else if (act == KB_SHOW) {
+              kbShowPass = !kbShowPass;
               drawKeyboard();
             } else if (act == KB_DONE) {
               wifiConnectTo(kbSsid, String(kbPass));

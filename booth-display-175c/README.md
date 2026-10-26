@@ -18,9 +18,9 @@ BOOT button advances / toggles within the current mode.
 
 **Compile-verified 2026-10-25** via PlatformIO (esp32-s3-devkitc-1, Arduino
 framework, GFX + SensorLib + core BLE HID + core I2S): build **SUCCESS**,
-RAM 21.6%, flash 45.4% for the no-photo build (includes Settings Wi-Fi,
+RAM 21.6%, flash 45.3% for the no-photo build (includes Settings Wi-Fi,
 all three clock views, the flip clock's clack sound, scrollable menu,
-and sleep). Note: the
+and working sleep with panel-off). Note: the
 sketch deliberately uses no sketch-defined types in function signatures —
 Arduino IDE auto-generates prototypes before those types are defined, so
 a custom type in a signature fails there even though plain C++ accepts it. The clicker uses the ESP32 core's
@@ -124,23 +124,38 @@ Tips:
   mode syncs once via NTP. Otherwise the clock runs from the sketch's
   compile time, so flash soon after compiling and it will be right for
   the day. Timezone is US Eastern (`CLOCK_TZ` at the top of the sketch —
-  change it if you travel).
+  change it if you travel). The digital view shows EDT/EST next to the
+  date so you can see the timezone took effect. (Earlier bug, fixed:
+  the sync used to reset the timezone to UTC, so a synced clock read
+  4 hours ahead. It now syncs with the Eastern TZ string intact.)
 - **Settings → Wi-Fi:** the settings screen shows the connection status
   (connected network + IP, saved network, or not connected). Tap
   **Wi-Fi networks** to scan — networks are listed strongest first, with
   signal bars and a padlock for secured ones. Tap one: open networks
   connect immediately; secured ones open an on-screen keyboard (letters,
   Shift for capitals, `#+=" for symbols, Space, backspace, Done, Cancel).
+  The password field shows what you type in large text (with a cursor
+  mark), scrolling to the most recent characters on long passwords —
+  typing blind behind asterisks on a tiny keyboard was unusable. A
+  Hide/Show key on the bottom row masks it again if anyone is watching
+  over your shoulder.
   On success the network is saved on the device, so it survives reboots
   and the clock's NTP sync uses it automatically. **Forget saved Wi-Fi**
   clears it. BOOT goes back to the settings menu from any Wi-Fi screen.
   (You can still hardcode `WIFI_SSID` / `WIFI_PASS` at the top of the
   sketch instead — that takes priority if filled in.)
 - **Settings → Sleep device:** asks for confirmation, then puts the
-  board into deep sleep — screen dark, everything off. Only the side
-  **BOOT button** wakes it (it restarts to the menu). Your saved Wi-Fi
-  survives the sleep; the clock re-syncs via NTP next time you open it
-  if a network is saved, otherwise it restarts from compile time.
+  board into deep sleep — the panel itself is switched off first (deep
+  sleep alone leaves the last frame showing, since the panel keeps its
+  power rail), then everything halts. Only the side **BOOT button**
+  wakes it (it restarts to the menu). Your saved Wi-Fi survives the
+  sleep; the clock re-syncs via NTP next time you open it if a network
+  is saved, otherwise it restarts from compile time.
+- **Hardware power-off (no software needed):** the **PWR button** is
+  wired to the board's power-management chip — hold it down for several
+  seconds to power the board fully off, press it again to power back on.
+  You don't need BOOT for this; BOOT held at power-on puts the ESP32
+  into download mode instead, which is not what you want here.
 - **Clicker:** open Clicker mode, then on your laptop pair Bluetooth →
   "Waveshare Clicker". Tap the right half for next slide, left half for
   previous. Long-press on the device returns to the menu (and stops
